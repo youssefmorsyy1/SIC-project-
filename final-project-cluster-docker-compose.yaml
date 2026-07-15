@@ -1,0 +1,226 @@
+version: "3"
+
+
+services:
+# Setting Up HDFS & YARN #
+  namenode:
+    image: mrugankray/namenode-spark-airflow-flume-zepplin:1.1
+    container_name: namenode
+    restart: always
+    ports:
+      - 9870:9870
+      - 7000:9000
+      - 8082:8082 # zeppelin ui
+      - 8080:8080 # spark master web ui
+      - 8081:8081 # spark slave web ui
+      - 4040:4040 # spark driver web ui
+      - 3000:3000 # airflow ui
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+      - hadoop_namenode_conda:/root/anaconda
+      - hadoop_namenode_spark:/opt/spark
+      - hadoop_namenode_zeppelin:/opt/zeppelin
+      - ./configs/zeppelin-site.xml:/opt/zeppelin/conf/zeppelin-site.xml
+      - ./configs/zeppelin-env.sh:/opt/zeppelin/conf/zeppelin-env.sh
+      - ./configs/namenode_bashrc.txt:/root/.bashrc
+      - ./configs/namenode_airflow.cfg:/root/airflow/airflow.cfg
+      - ./dags:/root/airflow/dags
+      - airflow_namenode:/root/airflow
+      - ./configs/namenode/flume/flume-env.sh:/opt/flume/conf/flume-env.sh
+      - ./flume_config/flume.conf:/opt/flume/conf/flume.conf
+      - hadoop_namenode_flume:/opt/flume
+      - /home/hageribraheem/weather_sales_data:/data
+      - nifi_shared:/shared
+    environment:
+      - CLUSTER_NAME=hadoop-learning
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    env_file:
+      - ./hadoop.env
+
+
+  datanode:
+    image: mrugankray/datanode-python:1.0
+    container_name: datanode
+    restart: always
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+      - hadoop_datanode_conda:/root/anaconda
+      - ./configs/datanode_bashrc.txt:/root/.bashrc
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
+    ports:
+      - "9864:9864"
+    env_file:
+      - ./hadoop.env
+
+
+  resourcemanager:
+    image: mrugankray/resourcemanager-python:1.0
+    container_name: resourcemanager
+    restart: always
+    volumes:
+      - hadoop_resourcemanager_conda:/root/anaconda
+      - ./configs/resourcemanager_bashrc.txt:/root/.bashrc
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864"
+    ports:
+      - "8088:8088"
+    env_file:
+      - ./hadoop.env
+
+
+  nodemanager:
+    image: mrugankray/nodemanager-python:1.0
+    container_name: nodemanager
+    restart: always
+    volumes:
+      - hadoop_nodemanager_conda:/root/anaconda
+      - ./configs/nodemanager_bashrc.txt:/root/.bashrc
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 resourcemanager:8088"
+    ports:
+      - "8042:8042"
+      - "19888:19888" # to access job history
+    env_file:
+      - ./hadoop.env
+
+
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop3.2.1-java8
+    container_name: historyserver
+    restart: always
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 resourcemanager:8088"
+    ports:
+      - "8188:8188"
+    volumes:
+      - hadoop_historyserver:/hadoop/yarn/timeline
+    env_file:
+      - ./hadoop.env
+
+
+# Setting up Hive #
+  hive-server:
+    image: mrugankray/hive-server-sqoop:1.0
+    container_name: hive-server
+    depends_on:
+      - namenode
+      - datanode
+      - hive-metastore
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - hadoop_hive_server_sqoop:/usr/lib/sqoop
+      - ./configs/hive_server/sqoop-env.sh:/usr/lib/sqoop/conf/sqoop-env.sh
+      - ./configs/hive_server/hive_server_bashrc.txt:/root/.bashrc
+      - ./configs/hive_server/sqoop-site.xml:/usr/lib/sqoop/conf/sqoop-site.xml
+      - ./configs/hive_server/sshd_config.conf:/etc/ssh/sshd_config
+    environment:
+      HIVE_CORE_CONF_javax_jdo_option_ConnectionURL: "jdbc:postgresql://hive-metastore/metastore"
+      SERVICE_PRECONDITION: "hive-metastore:9083"
+    ports:
+      - 10000:10000
+
+
+  hive-metastore:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-metastore
+    env_file:
+      - ./hadoop.env
+    command: /opt/hive/bin/hive --service metastore
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 hive-metastore-postgresql:5432"
+    ports:
+      - "8083:9083"
+    depends_on:
+      - hive-metastore-postgresql
+
+
+  hive-metastore-postgresql:
+    image: bde2020/hive-metastore-postgresql:2.3.0
+    container_name: hive-metastore-postgresql
+    volumes:
+      - hive_metastore_db:/var/lib/postgresql/data
+
+
+# Hue #
+  huedb:
+    image: postgres:15.1-alpine3.17
+    container_name: huedb
+    volumes:
+      - hue_pg_data:/var/lib/postgresql/data
+    env_file:
+      - ./hadoop.env
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 hive-metastore-postgresql:5432 hive-metastore:9083 hive-server:10000 resourcemanager:8088"
+      POSTGRES_USER: hue
+      POSTGRES_PASSWORD: hue
+      POSTGRES_DB: hue
+
+
+  hue:
+    image: gethue/hue:4.6.0
+    container_name: hue
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 hive-metastore-postgresql:5432 hive-metastore:9083 hive-server:10000 resourcemanager:8088"
+    ports:
+      - "9888:8888"
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - ./hue-overrides.ini:/usr/share/hue/desktop/conf/hue-overrides.ini
+    depends_on:
+      - huedb
+
+
+# Apache NiFi for Data Ingestion #
+  nifi:
+    image: apache/nifi:latest
+    container_name: nifi
+    restart: always
+    ports:
+      - "8443:8443"
+    volumes:
+      - nifi_conf:/opt/nifi/nifi-current/conf
+      - nifi_logs:/opt/nifi/nifi-current/logs
+      - nifi_database:/opt/nifi/nifi-current/database_repository
+      - nifi_flowfile:/opt/nifi/nifi-current/flowfile_repository
+      - nifi_content:/opt/nifi/nifi-current/content_repository
+      - nifi_provenance:/opt/nifi/nifi-current/provenance_repository
+      - nifi_state:/opt/nifi/nifi-current/state
+      - ./nifi-extensions:/opt/nifi/nifi-current/extensions  
+      - nifi_shared:/opt/nifi/nifi-current/input
+    environment:
+      - SINGLE_USER_CREDENTIALS_USERNAME=admin
+      - SINGLE_USER_CREDENTIALS_PASSWORD=ctsBtRBKHRAx69EqUghvvgEvjnaLjFEB
+    depends_on:
+      - namenode
+      - datanode
+
+
+
+
+volumes:
+  hadoop_namenode:
+  hadoop_namenode_conda:
+  hadoop_namenode_spark:
+  hadoop_namenode_zeppelin:
+  hadoop_namenode_flume:
+  hadoop_datanode:
+  hadoop_datanode_conda:
+  hadoop_resourcemanager_conda:
+  hadoop_nodemanager_conda:
+  hadoop_historyserver:
+  hadoop_hive_server_sqoop:
+  hue_pg_data:
+  airflow_namenode:
+  hive_metastore_db:
+  nifi_conf:
+  nifi_logs:
+  nifi_database:
+  nifi_flowfile:
+  nifi_content:
+  nifi_provenance:
+  nifi_state:
+  nifi_shared:
